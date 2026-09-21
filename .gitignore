@@ -1,0 +1,30 @@
+# Secret & Environment Variables (Zero-Leak Policy)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python Cache & Build Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# Jupyter Checkpoints & OS Junk
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Databases & Local Logs
+*.db
+*.sqlite
+*.log
