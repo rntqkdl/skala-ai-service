@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 import gradio as gr
 from pydantic import BaseModel, Field
@@ -36,10 +37,16 @@ def search_meal_cost(venue_name: str) -> str:
     except Exception as e:
         return "웨딩홀 기본 표준 식대(약 80,000원) 대체 적용"
 
-# 5. 3단계: 최종 판정 Pydantic 출력 스키마 (성의도 등급 및 실제 시세 범위 필드)
+# 5. 3단계: 최종 판정 Pydantic 출력 스키마 (밀도 정량 지수 및 맞춤형 카톡 멘트)
 class WeddingGiftVerdict(BaseModel):
     delivery_grade: str = Field(
         description="판정된 청첩장 성의도 등급: '1등급 (직접 식사 대접)', '2등급 (개인 정성 연락)', '3등급 (모바일 링크만 살포/스팸)' 중 하나"
+    )
+    relationship_density_score: int = Field(
+        description="인간관계 밀도 정량 점수 (0-100점). 고락 공유 경험(프로젝트 밤샘 등), 최근 교류 빈도, 정서적 부채감을 종합 평가한 수치"
+    )
+    density_stars: str = Field(
+        description="밀도 점수 기반 별표 시각화 (예: '★★★★★ (95점) [고밀도 전우애/인생멘토]', '★★★☆☆ (50점) [비즈니스 지인형]', '★☆☆☆☆ (10점) [희석된 연락두절형]')"
     )
     venue_name: str = Field(
         description="확인된 예식장 명칭 (예: 강남 아펠가모 선릉, 신라호텔 다이너스티홀)"
@@ -60,7 +67,7 @@ class WeddingGiftVerdict(BaseModel):
         description="식대 시세, 관계 친밀도, 전달 성의도, 신분을 종합 분석한 현실적 판정 이유"
     )
     kakao_message_template: str = Field(
-        description="상대방과의 관계(사수, 동창, 친구 등)와 수신 맥락을 반영하여 복사해 바로 보낼 수 있는 실전 카카오톡 메시지. 로봇 같은 어색한 번역투('기쁜 날 직접 찾아뵙고...' 등) 절대 금지. 사수가 밥을 사준 경우 식사 대접 감사와 당일 참석 약속, 불참 시 자연스러운 선약 양해와 축복 작성."
+        description="상대방과의 관계(사수, 동기, 동창, 타 부서 등)와 수신 맥락을 반영하여 복사해 바로 보낼 수 있는 실전 카카오톡 메시지. 상대방의 위계/호칭에 따른 존댓말/구어체 완벽 매칭, 밥 대접 감사/원거리 양해/식사 미참석 양해 등 필수 반영."
     )
 
 system_instruction = """
@@ -70,6 +77,13 @@ system_instruction = """
 [자릿수 변환 절대 주의 규칙 (단위 환각 방지)]
 - 한국어의 '20만원', '25만원'은 각각 200,000원과 250,000원입니다. '만' 단위를 1,000으로 착각하여 '20,000원 - 25,000원'으로 자릿수를 누락(0 하나 탈락)하는 단위 환각 오류를 절대 범하지 마세요.
 - 특급 호텔(신라호텔 등) 식대는 20,000원이 아니라 200,000원대입니다. meal_cost_range에는 반드시 '1인 약 200,000원 - 250,000원 선' 또는 '1인 약 20만원 - 25만원 선'으로 올바르게 표기하세요.
+
+[인간관계 밀도(Density) 정량화 및 별표 평가 기준 (0-100점)]
+- 85점 - 100점 (★★★★★) [고밀도 전우애/인생멘토]: 시험, 부트캠프, 프로젝트 밤샘 동고동락, 멘토링 수혜, 최근 6개월 내 밀착 교류 및 밥 대접 수혜.
+- 60점 - 84점 (★★★★☆) [친밀한 동료/절친]: 직속 팀원, 사수, 정기적 사적 모임 유지 친구.
+- 35점 - 59점 (★★★☆☆) [비즈니스 동료/보통 지인]: 타 부서 동료, 업무상 주기적 마주침, 가끔 안부 묻는 동기.
+- 15점 - 34점 (★★☆☆☆) [희석된 옛 지인]: 연차만 오래되고 최근 2-3년 이상 연락이 뜸한 동창.
+- 0점 - 14점 (★☆☆☆☆) [연락두절 스팸/결례]: 4-5년 이상 연락 없다가 단톡방에 모바일 청첩장 링크만 투척한 결례 관계.
 
 [청첩장 성의도 3대 기준 정의 및 판정 룰]
 1. 성의도 등급 분류 (delivery_grade):
@@ -89,11 +103,16 @@ system_instruction = """
    - attendance_decision이 '계좌 송금 후 불참'이면 recommended_amount는 반드시 30,000 또는 50,000
    - attendance_decision이 '직접 참석하여 식사'일 때만 recommended_amount가 식대 원가 이상(100,000원 이상)
 
-5. 상황 맞춤형 실전 카톡 멘트 원칙 (kakao_message_template):
-   - 기계적인 번역투나 "기쁜 날 직접 찾아뵙고 축하해 드리겠다" 같은 어색한 AI 클리셰는 절대 사용하지 마세요.
-   - [사회적 결례 엄금]: 카톡 메시지에 본인이 낼 축의금 액수(예: '축의금은 20만원 준비했습니다' 등)는 상대방에게 절대 직접 언급하지 마세요.
-   - [참석 판정 시]: 사용자의 관계(직속 사수, 선배, 교육 동기 등)와 사전 상황(비싼 밥을 사준 사실)을 반영하여, 식사 대접에 대한 감사 인사와 식장 당일 참석 약속을 자연스러운 존댓말로 작성하세요. (예: "형/선배님, 지난번에 맛있는 식사 대접해 주셔서 정말 감사했습니다. 결혼 진심으로 축하드리며, 결혼식 날 꼭 참석해서 축하드리겠습니다! 당일에 뵙겠습니다.")
-   - [불참/패스 판정 시]: "결혼 진심으로 축하해! 미리 잡힌 선약이 있어서 아쉽게도 참석은 어려울 것 같아. 멀리서나마 응원하고 축하할게, 행복한 결혼식 되길 바라!"처럼 정중하고 자연스러운 구어체 메시지를 작성하세요.
+5. 상대방 위계 및 상황별 실전 카톡 멘트 동적 생성 규칙 (kakao_message_template):
+   - [축의금 액수 언급 절대 금지]: 카톡 메시지 본문에는 축의금이나 돈, 액수와 관련된 단어(얼마를 낸다, 준비했다 등)를 단 한마디도 쓰지 마세요. 한국 경조사 문화에서 당사자에게 축의금 금액을 직접 알리는 것은 중대한 결례입니다. 오직 진심 어린 축하, 밥 대접에 대한 감사, 당일 참석 약속(또는 불참 선약 양해) 내용만 담으세요.
+   - [호칭 및 말투 격식 완벽 매칭]:
+     1. 상대방이 사수, 선배, 직장 상사인 경우: 반드시 "형/선배님/대리님, 결혼 진심으로 축하드립니다"로 시작하여 정중하고 깍듯한 존댓말을 구사하세요.
+     2. 상대방이 동기, 친구인 경우: 친근하고 자연스러운 구어체를 사용하세요 (예: "형/OO아, 결혼 진짜 축하해!").
+     3. 상대방이 연락 없던 동창이거나 단톡방 스팸인 경우: 사적인 군더더기 없이 깔끔하고 건조한 표준 축하 인사를 작성하세요.
+   - [사전 맥락 및 특수 상황 필수 반영]:
+     1. 사전에 밥을 얻어먹은 경우: "지난번에 바쁘신 와중에도 맛있는 식사 대접해 주셔서 정말 감사했습니다" 문구를 본문에 반드시 포함하세요.
+     2. 원거리(부산/지방)로 불참하는 경우: "예식장이 부산이라 직접 찾아뵙고 축하드리지 못해 마음이 정말 무겁고 아쉽습니다"와 같이 지리적 이동 사유를 정중히 밝히세요.
+     3. 당일 선약으로 식사 없이 봉투만 전달하는 경우: "당일 미리 잡힌 선약이 있어서 식사는 함께하지 못하고, 식장 앞에서 인사드리고 봉투만 전달드려야 할 것 같습니다. 죄송하고 진심으로 축하드립니다"로 사전 양해를 구하세요.
 
 6. 식대 원가 하한선 원칙:
    - 식사를 직접 참석할 경우, 축의금은 식대 원가 이상이어야 합니다 (적자 유발 방지).
@@ -117,7 +136,7 @@ decision_chain = decision_prompt | llm.with_structured_output(WeddingGiftVerdict
 # 통합 처리 함수
 def process_wedding_inquiry(user_story: str):
     if not user_story.strip():
-        return "상황을 입력해 주세요.", "대기 중", "대기 중", "0 원", "내용을 작성해 주시면 분석관이 판정표를 작성합니다.", ""
+        return "상황을 입력해 주세요.", "대기 중", "대기 중", "대기 중", "0 원", "내용을 작성해 주시면 분석관이 판정표를 작성합니다.", ""
     
     # 1. 예식장 이름 추출
     try:
@@ -136,19 +155,24 @@ def process_wedding_inquiry(user_story: str):
     })
     
     grade_text = result.delivery_grade
+    density_text = f"{result.density_stars} ({result.relationship_density_score}점 / 100점)"
     
-    # 자릿수 단위 오류 방어 가드레일 (20,000원 -> 200,000원 자동 보정)
+    # 자릿수 단위 오류 방어 가드레일 (특급호텔 20,000원 -> 200,000원 0 탈락 자동 보정)
     cost_range = result.meal_cost_range
     if result.estimated_meal_cost >= 100000:
-        for wrong_val in ["20,000", "21,000", "22,000", "23,000", "24,000", "25,000", "26,000", "27,000", "28,000", "29,000", "30,000"]:
-            if wrong_val in cost_range and f"{wrong_val}0" not in cost_range:
-                cost_range = cost_range.replace(wrong_val, f"{wrong_val}0")
+        cost_range = re.sub(r'(?<![0-9])([1-3][0-9]),000(?![0-9])', r'\g<1>0,000', cost_range)
                 
     venue_price_text = f"{result.venue_name}: {cost_range} (기준 식대: {result.estimated_meal_cost:,} 원)"
     decision_text = result.attendance_decision
     amount_text = f"{result.recommended_amount:,} 원" if result.recommended_amount > 0 else "0 원 (정중한 축하 인사 후 패스)"
     
-    return grade_text, venue_price_text, decision_text, amount_text, result.reasoning_analysis, result.kakao_message_template
+    # 카톡 메시지 에티켓 가드레일 (축의금 액수 직접 언급 문구 자동 제거)
+    kakao_text = result.kakao_message_template
+    kakao_text = re.sub(r"축의금[^\.\!\?]*[\.\!\?]?", "", kakao_text).strip()
+    kakao_text = re.sub(r"[0-9만,]+원[^\.\!\?]*[\.\!\?]?", "", kakao_text).strip()
+    kakao_text = re.sub(r"\s{2,}", " ", kakao_text)
+    
+    return grade_text, density_text, venue_price_text, decision_text, amount_text, result.reasoning_analysis, kakao_text
 
 # 6. Gradio 인터랙티브 웹 UI (가이드 카드 + 단일 텍스트 입력창)
 custom_css = """
@@ -194,11 +218,12 @@ with gr.Blocks(title="결혼식 축의금 손익 판독기") as demo:
         with gr.Column(scale=1):
             gr.Markdown("### 📊 분석관의 현실주의 판정표")
             out_grade = gr.Textbox(label="🏷️ 판정된 청첩장 성의도 등급")
+            out_density = gr.Textbox(label="⭐ 인간관계 밀도 지수 (Relationship Density)")
             out_meal_cost = gr.Textbox(label="🍽️ 조사된 예식장 실제 시세 및 1인 식대 원가")
             out_decision = gr.Textbox(label="⚖️ 최종 행동 지침 (Action Verdict)")
             out_amount = gr.Textbox(label="💰 추천 적정 축의금")
             out_reasoning = gr.TextArea(label="💡 현실주의 판정 근거 (죄책감 해소)", lines=5)
-            out_kakao = gr.TextArea(label="📱 즉시 전송용 맞춤형 실전 카톡 멘트 (원클릭 복사)", lines=4)
+            out_kakao = gr.TextArea(label="📱 상대방 맞춤형 실전 카톡 멘트 (상황 및 호칭 완벽 매칭)", lines=4)
             
     # 예시 버튼 바인딩 (현실감 넘치는 커뮤니티/실제 하소연 어조)
     btn_ex1.click(
@@ -222,7 +247,7 @@ with gr.Blocks(title="결혼식 축의금 손익 판독기") as demo:
     submit_btn.click(
         fn=process_wedding_inquiry,
         inputs=user_input,
-        outputs=[out_grade, out_meal_cost, out_decision, out_amount, out_reasoning, out_kakao]
+        outputs=[out_grade, out_density, out_meal_cost, out_decision, out_amount, out_reasoning, out_kakao]
     )
 
 if __name__ == "__main__":
